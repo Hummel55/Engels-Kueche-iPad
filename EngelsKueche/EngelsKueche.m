@@ -608,9 +608,9 @@ static BOOL EGIsNight(NSDate *date) {
     self.serverField.text = EGServerURL();
     [self.stack addArrangedSubview:self.serverField]; [self.serverField.heightAnchor constraintEqualToConstant:44].active = YES;
     [self addText:@"Tag beginnt" size:16];
-    self.dayPicker = [self timePickerFor:EGDayKey]; [self.stack addArrangedSubview:self.dayPicker];
+    self.dayPicker = [self timePickerFor:EGDayKey]; [self addNarrowTimePicker:self.dayPicker];
     [self addText:@"Nacht beginnt" size:16];
-    self.nightPicker = [self timePickerFor:EGNightKey]; [self.stack addArrangedSubview:self.nightPicker];
+    self.nightPicker = [self timePickerFor:EGNightKey]; [self addNarrowTimePicker:self.nightPicker];
     self.activeSlider = [self addSlider:@"Bei Bedienung" key:EGActiveKey minimum:10 maximum:100 suffix:@" %"];
     self.idleSlider = [self addSlider:@"Nach Inaktivität" key:EGIdleKey minimum:1 maximum:100 suffix:@" %"];
     self.nightSlider = [self addSlider:@"Nachts" key:EGNightBrightnessKey minimum:1 maximum:100 suffix:@" %"];
@@ -636,6 +636,21 @@ static BOOL EGIsNight(NSDate *date) {
     UILabel *l = [[UILabel alloc] init]; l.text = text; l.numberOfLines = 0;
     l.font = [UIFont systemFontOfSize:size]; l.textColor = [UIColor colorWithRed:.16 green:.22 blue:.18 alpha:1];
     [self.stack addArrangedSubview:l];
+}
+// A narrow date picker leaves the entire right half of the settings page
+// available for vertical swipes that won't spin the hour/minute wheels.
+- (void)addNarrowTimePicker:(UIDatePicker *)picker {
+    UIStackView *row = [[UIStackView alloc] init];
+    row.axis = UILayoutConstraintAxisHorizontal;
+    row.alignment = UIStackViewAlignmentCenter;
+    row.spacing = 0;
+    [row addArrangedSubview:picker];
+    UIView *scrollGutter = [[UIView alloc] init];
+    scrollGutter.userInteractionEnabled = NO;
+    [row addArrangedSubview:scrollGutter];
+    [self.stack addArrangedSubview:row];
+    [picker.widthAnchor constraintEqualToConstant:270].active = YES;
+    [row.heightAnchor constraintEqualToConstant:135].active = YES;
 }
 - (UIDatePicker *)timePickerFor:(NSString *)key {
     UIDatePicker *picker = [[UIDatePicker alloc] init]; picker.datePickerMode = UIDatePickerModeTime;
