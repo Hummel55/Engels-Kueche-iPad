@@ -322,13 +322,16 @@ static BOOL EGIsNight(NSDate *date) {
     WKUserContentController *user = [[WKUserContentController alloc] init];
     // WebKit loads this script before other page scripts, so the scan click
     // reaches our native UIImagePickerController rather than the HTML picker.
+    // Let the native iPad display use all available height while preserving
+    // natural scrolling on content-heavy dashboard pages.
     NSString *bridge = @"(function(){window.engelsNativeApp=true;"
       @"document.addEventListener('click',function(e){"
       @"var p=e.target;while(p&&p!==document){if(p.id==='photo'){"
       @"e.preventDefault();e.stopPropagation();e.stopImmediatePropagation();"
       @"window.webkit.messageHandlers.engelsKitchen.postMessage({action:'scan'});return;}p=p.parentNode;}"
       @"},true);"
-      @"var s=document.createElement('style');s.textContent='#k-display-dimmer,#k-display-settings-button{display:none!important}';"
+      @"var s=document.createElement('style');s.textContent='#k-display-dimmer,#k-display-settings-button{display:none!important}' +"
+      @"'@media (min-width:761px){.shell>main{display:flex!important;flex-direction:column!important;min-height:100vh!important}.shell>main>.dashboard{flex:1 0 auto!important;align-items:stretch!important}.shell>main>footer{margin-top:auto!important}}';"
       @"if(document.documentElement){document.documentElement.appendChild(s);}else{document.addEventListener('DOMContentLoaded',function(){document.documentElement.appendChild(s);});}"
       @"})();";
     [user addUserScript:[[WKUserScript alloc] initWithSource:bridge injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:YES]];
