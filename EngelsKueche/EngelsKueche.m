@@ -2,6 +2,7 @@
 // Native UIKit + WKWebView. No private APIs, no third-party framework.
 #import <UIKit/UIKit.h>
 #import <WebKit/WebKit.h>
+#import <AVFoundation/AVFoundation.h>
 #include <math.h>
 
 static NSString * const EGTouchNotification = @"EGTouchNotification";
@@ -60,15 +61,225 @@ static BOOL EGIsNight(NSDate *date) {
 }
 @end
 
+
+// Camera capture is independent from Apple's UIImagePickerController, which can
+// show a black, unresponsive shutter on older iPadOS/jailbroken devices.
+@interface EGCameraController : UIViewController <AVCapturePhotoCaptureDelegate>
+@property(nonatomic,copy) void (^photoHandler)(UIImage *);
+@property(nonatomic,strong) AVCaptureSession *session;
+@property(nonatomic,strong) AVCapturePhotoOutput *photoOutput;
+@property(nonatomic,strong) AVCaptureVideoPreviewLayer *preview;
+@property(nonatomic,strong) UILabel *hint;
+@property(nonatomic,strong) UIButton *shutter;
+@property(nonatomic,strong) UIButton *flip;
+@property(nonatomic,assign) AVCaptureDevicePosition position;
+@property(nonatomic,assign) BOOL takingPhoto;
+@end
+
+@implementation EGCameraController
+- (BOOL)prefersStatusBarHidden { return YES; }
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.view.backgroundColor = UIColor.blackColor;
+    self.position = [[NSUserDefaults standardUserDefaults] boolForKey:EGFrontKey] ?
+        AVCaptureDevicePositionFront : AVCaptureDevicePositionBack;
+    self.preview = [AVCaptureVideoPreviewLayer layer];
+    self.preview.videoGravity = AVLayerVideoGravityResizeAspectFill;
+    [self.view.layer addSublayer:self.preview];
+
+    UIView *bar = [[UIView alloc] init];
+    bar.translatesAutoresizingMaskIntoConstraints = NO;
+    bar.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:.7];
+    [self.view addSubview:bar];
+
+    UIButton *cancel = [UIButton buttonWithType:UIButtonTypeSystem];
+    [cancel setTitle:@"Abbrechen" forState:UIControlStateNormal];
+    [cancel setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+    cancel.translatesAutoresizingMaskIntoConstraints = NO;
+    cancel.titleLabel.font = [UIFont systemFontOfSize:19 weight:UIFontWeightMedium];
+    [cancel addTarget:self action:@selector(cancelCamera) forControlEvents:UIControlEventTouchUpInside];
+    [bar addSubview:cancel];
+
+    self.flip = [UIButton buttonWithType:UIButtonTypeSystem];
+    [self.flip setTitle:@"Kamera wechseln" forState:UIControlStateNormal];
+    [self.flip setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+    self.flip.translatesAutoresizingMaskIntoConstraints = NO;
+    self.flip.titleLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightMedium];
+    [self.flip addTarget:self action:@selector(switchCamera) forControlEvents:UIControlEventTouchUpInside];
+    [bar addSubview:self.flip];
+
+    self.shutter = [UIButton buttonWithType:UIButtonTypeCustom];
+    self.shutter.translatesAutoresizingMaskIntoConstraints = NO;
+    self.shutter.backgroundColor = UIColor.whiteColor;
+    self.shutter.layer.cornerRadius = 34;
+    self.shutter.layer.borderColor = UIColor.lightGrayColor.CGColor;
+    self.shutter.layer.borderWidth = 4;
+    self.shutter.accessibilityLabel = @"Rezept fotografieren";
+    self.shutter.enabled = NO;
+    [self.shutter addTarget:self action:@selector(takePhoto) forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:self.shutter];
+
+    self.hint = [[UILabel alloc] init];
+    self.hint.translatesAutoresizingMaskIntoConstraints = NO;
+    self.hint.textAlignment = NSTextAlignmentCenter;
+    self.hint.numberOfLines = 0;
+    self.hint.textColor = UIColor.whiteColor;
+    self.hint.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:.5];
+    self.hint.font = [UIFont systemFontOfSize:16 weight:UIFontWeightMedium];
+    self.hint.text = @"Kamera startet …";
+    [self.view addSubview:self.hint];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [bar.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [bar.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        [bar.topAnchor constraintEqualToAnchor:self.view.topAnchor],
+        [bar.heightAnchor constraintEqualToConstant:72],
+        [cancel.leadingAnchor constraintEqualToAnchor:bar.leadingAnchor constant:18],
+        [cancel.centerYAnchor constraintEqualToAnchor:bar.centerYAnchor],
+        [self.flip.trailingAnchor constraintEqualToAnchor:bar.trailingAnchor constant:-18],
+        [self.flip.centerYAnchor constraintEqualToAnchor:bar.centerYAnchor],
+        [self.shutter.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
+        [self.shutter.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor constant:-30],
+        [self.shutter.widthAnchor constraintEqualToConstant:68],
+        [self.shutter.heightAnchor constraintEqualToConstant:68],
+        [self.hint.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
+        [self.hint.bottomAnchor constraintEqualToAnchor:self.shutter.topAnchor constant:-24],
+        [self.hint.widthAnchor constraintLessThanOrEqualToAnchor:self.view.widthAnchor multiplier:.9]
+    ]];
+    [self checkCameraPermission];
+}
+- (void)viewDidLayoutSubviews {
+    [super viewDidLayoutSubviews];
+    self.preview.frame = self.view.bounds;
+}
+- (void)showCameraMessage:(NSString *)message {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        self.hint.text = message;
+        self.hint.hidden = (message.length == 0);
+    });
+}
+- (void)checkCameraPermission {
+    AVAuthorizationStatus status = [AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeVideo];
+    if (status == AVAuthorizationStatusAuthorized) { [self setupCamera]; return; }
+    if (status == AVAuthorizationStatusNotDetermined) {
+        [AVCaptureDevice requestAccessForMediaType:AVMediaTypeVideo completionHandler:^(BOOL allowed) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (allowed) [self setupCamera];
+                else [self showCameraMessage:@"Kamerazugriff abgelehnt. Unter Einstellungen > Datenschutz > Kamera für Engels Küche erlauben."];
+            });
+        }];
+        return;
+    }
+    [self showCameraMessage:@"Kein Kamerazugriff. Bitte unter Einstellungen > Datenschutz > Kamera für Engels Küche erlauben."];
+}
+- (AVCaptureDevice *)deviceForPosition:(AVCaptureDevicePosition)position {
+    return [AVCaptureDevice defaultDeviceWithDeviceType:AVCaptureDeviceTypeBuiltInWideAngleCamera
+                                              mediaType:AVMediaTypeVideo position:position];
+}
+- (void)setupCamera {
+    AVCaptureDevice *device = [self deviceForPosition:self.position];
+    if (!device) {
+        [self showCameraMessage:@"Diese Kamera ist nicht verfügbar. Bitte oben Kamera wechseln."];
+        self.flip.enabled = YES;
+        return;
+    }
+    self.shutter.enabled = NO;
+    self.shutter.alpha = .5;
+    self.flip.enabled = NO;
+    [self showCameraMessage:@"Kamera startet …"];
+    if (self.session) {
+        AVCaptureSession *oldSession = self.session;
+        self.session = nil;
+        self.preview.session = nil;
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ [oldSession stopRunning]; });
+    }
+    AVCaptureSession *session = [[AVCaptureSession alloc] init];
+    session.sessionPreset = AVCaptureSessionPresetPhoto;
+    NSError *error = nil;
+    AVCaptureDeviceInput *input = [AVCaptureDeviceInput deviceInputWithDevice:device error:&error];
+    AVCapturePhotoOutput *output = [[AVCapturePhotoOutput alloc] init];
+    if (!input || ![session canAddInput:input] || ![session canAddOutput:output]) {
+        self.flip.enabled = YES;
+        [self showCameraMessage:[NSString stringWithFormat:@"Kamera konnte nicht gestartet werden: %@. Bitte Kamera wechseln oder die normale iPad-Kamera testen.", error.localizedDescription ?: @"Gerät nicht verfügbar"]];
+        return;
+    }
+    [session addInput:input];
+    [session addOutput:output];
+    self.session = session;
+    self.photoOutput = output;
+    self.preview.session = session;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        [session startRunning];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (self.session != session) return;
+            self.flip.enabled = YES;
+            BOOL ok = session.isRunning;
+            self.shutter.enabled = ok;
+            self.shutter.alpha = ok ? 1 : .5;
+            [self showCameraMessage:ok ? @"" : @"Die Kamera startet nicht. Bitte Kamera wechseln oder die normale Kamera-App des iPads prüfen."];
+        });
+    });
+}
+- (void)switchCamera {
+    if (self.takingPhoto) return;
+    self.position = self.position == AVCaptureDevicePositionFront ?
+        AVCaptureDevicePositionBack : AVCaptureDevicePositionFront;
+    [[NSUserDefaults standardUserDefaults] setBool:(self.position == AVCaptureDevicePositionFront) forKey:EGFrontKey];
+    [self setupCamera];
+}
+- (void)takePhoto {
+    if (self.takingPhoto || !self.photoOutput || !self.session.isRunning) {
+        [self showCameraMessage:@"Kamera noch nicht bereit. Bitte kurz erneut versuchen."];
+        return;
+    }
+    self.takingPhoto = YES;
+    self.shutter.enabled = NO;
+    self.shutter.alpha = .5;
+    [self showCameraMessage:@"Foto wird aufgenommen …"];
+    AVCapturePhotoSettings *settings = [AVCapturePhotoSettings photoSettings];
+    [self.photoOutput capturePhotoWithSettings:settings delegate:self];
+}
+- (void)captureOutput:(AVCapturePhotoOutput *)output didFinishProcessingPhoto:(AVCapturePhoto *)photo error:(NSError *)error {
+    NSData *data = error ? nil : [photo fileDataRepresentation];
+    UIImage *image = data ? [UIImage imageWithData:data] : nil;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        self.takingPhoto = NO;
+        self.shutter.enabled = YES;
+        self.shutter.alpha = 1;
+        if (!image) {
+            [self showCameraMessage:[NSString stringWithFormat:@"Foto fehlgeschlagen: %@",error.localizedDescription ?: @"Kein Bild erhalten."]];
+            return;
+        }
+        [self dismissViewControllerAnimated:YES completion:^{
+            if (self.photoHandler) self.photoHandler(image);
+        }];
+    });
+}
+- (void)cancelCamera {
+    [self dismissViewControllerAnimated:YES completion:nil];
+}
+- (void)viewWillDisappear:(BOOL)animated {
+    [super viewWillDisappear:animated];
+    AVCaptureSession *session = self.session;
+    self.preview.session = nil;
+    self.session = nil;
+    if (session) dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0), ^{
+        [session stopRunning];
+    });
+}
+@end
+
 @class EGKitchenViewController;
 @interface EGSettingsViewController : UIViewController <UITextFieldDelegate>
 @property(nonatomic,weak) EGKitchenViewController *kitchen;
 @end
 
-@interface EGKitchenViewController : UIViewController <WKNavigationDelegate, WKScriptMessageHandler, UIImagePickerControllerDelegate, UINavigationControllerDelegate>
+@interface EGKitchenViewController : UIViewController <WKNavigationDelegate, WKScriptMessageHandler>
 @property(nonatomic,strong) WKWebView *web;
 @property(nonatomic,strong) UILabel *offlineLabel;
 @property(nonatomic,strong) UIButton *settingsButton;
+@property(nonatomic,strong) UIView *nightOverlay;
+@property(nonatomic,strong) UILabel *nightClockLabel;
 @property(nonatomic,strong) NSTimer *clockTimer;
 @property(nonatomic,strong) NSDate *lastTouch;
 @property(nonatomic,strong) NSDate *nightWakeUntil;
@@ -96,6 +307,7 @@ static BOOL EGIsNight(NSDate *date) {
     self.isInForeground = YES;
     [self makeWebView];
     [self makeControls];
+    [self makeNightClock];
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(touched) name:EGTouchNotification object:nil];
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(becameActive) name:UIApplicationDidBecomeActiveNotification object:nil];
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(willResign) name:UIApplicationWillResignActiveNotification object:nil];
@@ -167,8 +379,42 @@ static BOOL EGIsNight(NSDate *date) {
       [self.settingsButton.widthAnchor constraintEqualToConstant:44],
       [self.settingsButton.heightAnchor constraintEqualToConstant:44],
       [self.settingsButton.rightAnchor constraintEqualToAnchor:self.view.rightAnchor constant:-12],
-      [self.settingsButton.topAnchor constraintEqualToAnchor:self.view.topAnchor constant:14]
+      [self.settingsButton.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor constant:-12]
     ]];
+}
+// The nighttime view covers every control and the webpage, including the gear.
+// One touch wakes the normal kitchen for the configured period.
+- (void)makeNightClock {
+    self.nightOverlay = [[UIView alloc] init];
+    self.nightOverlay.translatesAutoresizingMaskIntoConstraints = NO;
+    self.nightOverlay.backgroundColor = UIColor.blackColor;
+    self.nightOverlay.hidden = YES;
+    self.nightOverlay.userInteractionEnabled = YES;
+    [self.view addSubview:self.nightOverlay];
+
+    self.nightClockLabel = [[UILabel alloc] init];
+    self.nightClockLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    self.nightClockLabel.textAlignment = NSTextAlignmentCenter;
+    self.nightClockLabel.textColor = UIColor.whiteColor;
+    self.nightClockLabel.font = [UIFont monospacedDigitSystemFontOfSize:86 weight:UIFontWeightUltraLight];
+    self.nightClockLabel.adjustsFontSizeToFitWidth = YES;
+    self.nightClockLabel.minimumScaleFactor = .4;
+    [self.nightOverlay addSubview:self.nightClockLabel];
+    [NSLayoutConstraint activateConstraints:@[
+        [self.nightOverlay.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [self.nightOverlay.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        [self.nightOverlay.topAnchor constraintEqualToAnchor:self.view.topAnchor],
+        [self.nightOverlay.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
+        [self.nightClockLabel.centerXAnchor constraintEqualToAnchor:self.nightOverlay.centerXAnchor],
+        [self.nightClockLabel.centerYAnchor constraintEqualToAnchor:self.nightOverlay.centerYAnchor],
+        [self.nightClockLabel.widthAnchor constraintLessThanOrEqualToAnchor:self.nightOverlay.widthAnchor multiplier:.9]
+    ]];
+}
+- (void)updateNightClock:(NSDate *)date {
+    NSDateFormatter *fmt = [[NSDateFormatter alloc] init];
+    fmt.locale = [NSLocale localeWithLocaleIdentifier:@"de_DE"];
+    fmt.dateFormat = @"HH:mm";
+    self.nightClockLabel.text = [fmt stringFromDate:date];
 }
 - (void)loadKitchen {
     NSString *address = EGServerURL();
@@ -208,24 +454,16 @@ static BOOL EGIsNight(NSDate *date) {
 }
 - (void)openCamera {
     if (![UIImagePickerController isSourceTypeAvailable:UIImagePickerControllerSourceTypeCamera]) {
-        [self showError:@"Auf diesem Gerät ist keine Kamera verfügbar."];
+        [self showError:@"Dieses iPad meldet keine verfügbare Kamera."];
         return;
     }
-    UIImagePickerController *picker = [[UIImagePickerController alloc] init];
-    picker.sourceType = UIImagePickerControllerSourceTypeCamera;
-    picker.delegate = self;
-    picker.allowsEditing = NO;
-    BOOL preferFront = [[NSUserDefaults standardUserDefaults] boolForKey:EGFrontKey];
-    UIImagePickerControllerCameraDevice want = preferFront ? UIImagePickerControllerCameraDeviceFront : UIImagePickerControllerCameraDeviceRear;
-    if ([UIImagePickerController isCameraDeviceAvailable:want]) picker.cameraDevice = want;
-    [self presentViewController:picker animated:YES completion:nil];
-}
-- (void)imagePickerControllerDidCancel:(UIImagePickerController *)picker {
-    [picker dismissViewControllerAnimated:YES completion:nil];
-}
-- (void)imagePickerController:(UIImagePickerController *)picker didFinishPickingMediaWithInfo:(NSDictionary<NSString *,id> *)info {
-    UIImage *image = info[UIImagePickerControllerOriginalImage];
-    [picker dismissViewControllerAnimated:YES completion:^{ [self forwardPhoto:image]; }];
+    EGCameraController *camera = [[EGCameraController alloc] init];
+    __weak typeof(self) weakSelf = self;
+    camera.photoHandler = ^(UIImage *image) {
+        [weakSelf forwardPhoto:image];
+    };
+    camera.modalPresentationStyle = UIModalPresentationFullScreen;
+    [self presentViewController:camera animated:YES completion:nil];
 }
 - (void)forwardPhoto:(UIImage *)image {
     if (!image) { [self showError:@"Kamerafoto konnte nicht gelesen werden."]; return; }
@@ -266,17 +504,22 @@ static BOOL EGIsNight(NSDate *date) {
         self.previousBrightness = [UIScreen mainScreen].brightness;
         self.brightnessRemembered = YES;
     }
+    NSDate *now = [NSDate date];
+    BOOL night = EGIsNight(now);
+    BOOL temporarilyAwake = self.nightWakeUntil &&
+        [self.nightWakeUntil compare:now] == NSOrderedDescending;
+    BOOL showNight = night && !temporarilyAwake && !self.pausedForSettings;
+    if (showNight) [self updateNightClock:now];
+    self.nightOverlay.hidden = !showNight;
     CGFloat target = EGPercent(EGActiveKey);
     if (!self.pausedForSettings) {
-        NSDate *now = [NSDate date];
-        if (EGIsNight(now)) {
-            if (!self.nightWakeUntil || [self.nightWakeUntil compare:now] != NSOrderedDescending) target = EGPercent(EGNightBrightnessKey);
-        } else {
+        if (showNight) target = EGPercent(EGNightBrightnessKey);
+        else if (!night) {
             NSInteger minutes = MAX(1, [[NSUserDefaults standardUserDefaults] integerForKey:EGDelayKey]);
             if ([now timeIntervalSinceDate:self.lastTouch] >= minutes*60) target = EGPercent(EGIdleKey);
         }
     }
-    if (fabs([UIScreen mainScreen].brightness-target) > .005) [UIScreen mainScreen].brightness = target;
+    if (fabs([UIScreen mainScreen].brightness - target) > .005) [UIScreen mainScreen].brightness = target;
 }
 - (void)becameActive {
     self.isInForeground = YES;
@@ -397,7 +640,7 @@ static BOOL EGIsNight(NSDate *date) {
 - (UIDatePicker *)timePickerFor:(NSString *)key {
     UIDatePicker *picker = [[UIDatePicker alloc] init]; picker.datePickerMode = UIDatePickerModeTime;
     picker.locale = [NSLocale localeWithLocaleIdentifier:@"de_DE"];
-    picker.minuteInterval = 5;
+    picker.minuteInterval = 1;
     NSDateFormatter *fmt = [[NSDateFormatter alloc] init]; fmt.dateFormat = @"HH:mm";
     NSDate *d = [fmt dateFromString:[[NSUserDefaults standardUserDefaults] stringForKey:key]];
     if (d) picker.date = d;
