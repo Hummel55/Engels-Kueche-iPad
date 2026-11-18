@@ -14,9 +14,9 @@ permissions:
 
 jobs:
   build:
-    # Standard macOS 15 ARM runner: avoid the Intel hosted-runner allocation failures.
-    # Xcode builds arm64 iOS device binaries regardless of host architecture.
-    runs-on: macos-15
+    # Restore the runner used by successful Build #3 (2026-11-18).
+    # If GitHub cannot allocate this hosted runner, the failure is infrastructure-related.
+    runs-on: macos-15-intel
     steps:
       - name: Repository auf den Build-Rechner laden
         uses: actions/checkout@v4
