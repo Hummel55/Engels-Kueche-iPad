@@ -14,7 +14,9 @@ permissions:
 
 jobs:
   build:
-    runs-on: macos-15-intel
+    # Standard macOS 15 ARM runner: avoid the Intel hosted-runner allocation failures.
+    # Xcode builds arm64 iOS device binaries regardless of host architecture.
+    runs-on: macos-15
     steps:
       - name: Repository auf den Build-Rechner laden
         uses: actions/checkout@v4
