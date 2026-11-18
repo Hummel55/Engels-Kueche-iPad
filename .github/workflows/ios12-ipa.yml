@@ -1,0 +1,54 @@
+name: Engels Küche iPad IPA (iOS 12)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - name: Quellcode laden
+        uses: actions/checkout@v4
+
+      - name: Xcode auswählen
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -d /Applications/Xcode_16.4.app ]; then
+            sudo xcode-select -s /Applications/Xcode_16.4.app/Contents/Developer
+          fi
+          xcodebuild -version
+          test -f EngelsKueche.xcodeproj/project.pbxproj
+          test -f EngelsKueche/EngelsKueche.m
+
+      - name: iOS-App ohne Apple-Developer-Konto bauen
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project EngelsKueche.xcodeproj \
+            -scheme EngelsKueche \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$RUNNER_TEMP/EGDerived" \
+            CODE_SIGNING_ALLOWED=NO \
+            ARCHS=arm64 \
+            build
+          APP="$RUNNER_TEMP/EGDerived/Build/Products/Release-iphoneos/EngelsKueche.app"
+          test -f "$APP/EngelsKueche"
+          /usr/bin/codesign --force --sign - --timestamp=none "$APP"
+          mkdir -p "$RUNNER_TEMP/ipas/Payload"
+          cp -a "$APP" "$RUNNER_TEMP/ipas/Payload/"
+          (cd "$RUNNER_TEMP/ipas" && zip -qr "$GITHUB_WORKSPACE/EngelsKueche-iPad-iOS12.ipa" Payload)
+          unzip -t "$GITHUB_WORKSPACE/EngelsKueche-iPad-iOS12.ipa" | tail -1
+
+      - name: IPA herunterladen
+        uses: actions/upload-artifact@v4
+        with:
+          name: EngelsKueche-iPad-iOS12-IPA
+          path: EngelsKueche-iPad-iOS12.ipa
+          retention-days: 7
